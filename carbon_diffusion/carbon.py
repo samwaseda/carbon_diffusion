@@ -109,6 +109,14 @@ class Carbon:
         return np.prod(self.L)/np.prod(self.N)
 
     @property
+    def mesh(self):
+        lin = [
+            np.linspace(0, l, n, endpoint=False)
+            for n, l in zip(self.N, self.L)
+        ]
+        return np.einsum('nxyz->xyzn', np.meshgrid(*lin, indexing='ij'))
+
+    @property
     def k_mesh(self):
         if self._k_mesh is None:
             k_lin = [
@@ -251,6 +259,14 @@ class Carbon:
         return -np.einsum(
             '...jk,...jj->...k', self.get_nabla(self._P_eff) , self.current_strain
         )-np.einsum('...j,...jjk->...k', self._P_eff, self.nabla_strain)
+
+    @property
+    def _laplace_u(self):
+        return -np.einsum(
+            '...j,...jj->...', self.get_laplace(self._P_eff), self.current_strain
+        )-2*np.einsum(
+            '...jk,...jjk->...', self.get_nabla(self._P_eff), self.nabla_strain
+        )-np.einsum('...j,...jj->...', self._P_eff, self.laplace_strain)
 
     @property
     def dUdt(self):
