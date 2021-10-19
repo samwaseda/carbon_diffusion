@@ -257,13 +257,13 @@ class Carbon:
     @property
     def _nabla_u(self):
         return -np.einsum(
-            '...jk,...jj->...k', self.get_nabla(self._P_eff) , self.current_strain
+            '...jk,...jj->...k', self.get_nabla(self._P_eff) , self.strain
         )-np.einsum('...j,...jjk->...k', self._P_eff, self.nabla_strain)
 
     @property
     def _laplace_u(self):
         return -np.einsum(
-            '...j,...jj->...', self.get_laplace(self._P_eff), self.current_strain
+            '...j,...jj->...', self.get_laplace(self._P_eff), self.strain
         )-2*np.einsum(
             '...jk,...jjk->...', self.get_nabla(self._P_eff), self.nabla_strain
         )-np.einsum('...j,...jj->...', self._P_eff, self.laplace_strain)
