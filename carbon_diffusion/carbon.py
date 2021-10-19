@@ -1,4 +1,5 @@
 import numpy as np
+from pyiron_continuum.elasticity.linear_elasticity import LinearElasticity
 
 
 def f(x, occ, c):
@@ -22,7 +23,9 @@ def get_factor(occ, c, tol=1e-8):
         ffprime = fprime(x, occ, c)
         x -= ff/ffprime
 
-
+elastic_tensor = np.array([
+    1.518305767738742151e+00, 9.055162512455107171e-01, 7.245888668410520594e-01
+])
 dipole_tensor = np.array([
     3.400301119999999955e+00, 3.400301119999999955e+00, 8.030965309999999135e+00
 ])
@@ -32,7 +35,7 @@ dipole_tensor = np.stack([np.roll(dipole_tensor, ii+1) for ii in range(3)], axis
 class Carbon:
     def __init__(
         self,
-        medium,
+        medium=LinearElasticity(elastic_tensor),
         L=(400, 40, 40),
         N=(100, 10, 10),
         dipole_tensor=dipole_tensor,
@@ -40,6 +43,7 @@ class Carbon:
         initial_strain=None,
         temperature=600,
         diffusion_coefficient=1,
+        fill_value=0.01,
         force_constant=0,
     ):
         self.L = L
@@ -47,7 +51,7 @@ class Carbon:
         self.dipole_tensor = dipole_tensor
         self._k_mesh = None
         self.medium = medium
-        self.c = np.zeros(self.N)
+        self.c = np.ones(self.N)*fill_value
         if initial_strain is None:
             initial_strain = np.zeros((3, 3))
             initial_strain[2,2] = 0.1
@@ -60,6 +64,7 @@ class Carbon:
         self._G_self = None
         self.fermi = False
         self._c_density = None
+        self._c_partial = None
 
     def initialize(self):
         self._k_mesh = None
@@ -152,19 +157,29 @@ class Carbon:
 
     @property
     def c_partial(self):
-        E = np.einsum(
-            'ij,...jj->...i', self.dipole_tensor, self.current_strain
-        )
-        if self.fermi:
+        if self._c_partial is None:
+            E = np.einsum(
+                'ij,...jj->...i', self.dipole_tensor, self.current_strain
+            )
             occ = np.exp(-E/self.kBT/self.c_density)
-            A = get_factor(occ, self.c)
-            return 1/(1+A.T*occ.T).T
-        occ = np.exp(E/self.kBT/self.c_density)
-        return np.einsum('...,...i,...->...i', self.c, occ, 1/np.sum(occ, axis=-1))
+            if self.fermi:
+                A = get_factor(occ, self.c)
+                self._c_partial = 1/(1+A.T*occ.T).T
+            else:
+                self._c_partial = np.einsum(
+                    '...,...i,...->...i', self.c, 1/occ, 1/np.sum(1/occ, axis=-1)
+                )
+        return self._c_partial
 
     @property
     def P(self):
         return np.einsum('...i,ik->...k', self.c_partial, self.dipole_tensor)*self.c_density
+
+    @property
+    def _P_eff(self):
+        return np.einsum(
+            '...i,ik,...->...k', self.c_partial, self.dipole_tensor, 1/self.c
+        )*self.c_density
 
     @property
     def _P_k(self):
@@ -174,12 +189,14 @@ class Carbon:
     def strain(self):
         strain_zero = self.strain_zero.copy()
         self.current_strain = np.einsum(
-            'xyzj,xyzk,xyzik,xyzk->xyzij', self.k_mesh, self.k_mesh, self.G_k, self._P_k, optimize=True
+            'xyzj,xyzk,xyzik,xyzk->xyzij', self.k_mesh, self.k_mesh, self.G_k, self._P_k,
+            optimize=True
         )
         self.current_strain = np.real(np.fft.ifftn(self.current_strain, axes=(0, 1, 2)))
         self.current_strain -= self.self_strain
         self.current_strain /= self.measure
         self.current_strain += strain_zero
+        self._c_partial = None
         return self.current_strain
 
     @property
@@ -193,38 +210,54 @@ class Carbon:
     def laplace_strain(self):
         return -np.real(np.fft.ifftn(np.einsum(
             '...l,...l,l,...j,...k,...ik,...k->...ij',
-            self.k_mesh, self.k_mesh, 1/np.array(self.N)**2, self.k_mesh, self.k_mesh, self.G_k, self._P_k,
+            self.k_mesh, self.k_mesh, 1/np.array(self.N)**2, self.k_mesh, self.k_mesh, self.G_k,
+            self._P_k,
             optimize=True
         ), axes=(0, 1, 2)))
 
     @property
     def displacement(self):
-        u_k = -np.einsum('xyzk,xyzik,xyzk->xyzi', self.k_mesh, self.G_k, self._P_k, optimize=True)*1j
+        u_k = -np.einsum(
+            'xyzk,xyzik,xyzk->xyzi', self.k_mesh, self.G_k, self._P_k, optimize=True
+        )*1j
         return np.real(np.fft.ifftn(u_k, axes=(0, 1, 2)))
 
     @property
     def kBT(self):
         return 8.617e-5*self.temperature
 
-    @property
-    def nabla_c(self):
+    def get_nabla(self, x):
         return np.einsum('i...->...i', [
-            (np.roll(self.c, -1, axis=ii)-np.roll(self.c, 1, axis=ii))/ss/2
+            (np.roll(x, -1, axis=ii)-np.roll(x, 1, axis=ii))/ss/2
             for ii, ss in enumerate(self.spacing)
         ])
 
-    @property
-    def laplace_c(self):
+    def get_laplace(self, x):
         return np.sum([
-            (np.sum([np.roll(self.c, jj, axis=ii) for jj in [-1, 1]], axis=0)-2*self.c)/ss**2
+            (np.sum([np.roll(x, jj, axis=ii) for jj in [-1, 1]], axis=0)-2*x)/ss**2
             for ii, ss in enumerate(self.spacing)
         ], axis=0)
 
     @property
+    def nabla_c(self):
+        return self.get_nabla(self.c)
+
+    @property
+    def laplace_c(self):
+        return self.get_laplace(self.c)
+
+    @property
+    def _nabla_u(self):
+        return -np.einsum(
+            '...jk,...jj->...k', self.get_nabla(self._P_eff) , self.current_strain
+        )-np.einsum('...j,...jjk->...k', self._P_eff, self.nabla_strain)
+
+    @property
     def dUdt(self):
-        de = np.einsum('...,...iik,in->...k', 1-2*self.c, self.nabla_strain, self.dipole_tensor)
-        dde = np.einsum('...,...,...ii,in->...', self.c, 1-self.c, self.laplace_strain, self.dipole_tensor)
-        return -self.D/self.kBT*(np.sum(de*self.nabla_c, axis=-1)+dde)
+        return self.D/self.kBT*(
+            (1-2*self.c)*np.sum(self.nabla_c*self._nabla_u, axis=-1)
+            + self.c*(1-self.c)*self._laplace_u
+        )
 
     @property
     def dSdt(self):
