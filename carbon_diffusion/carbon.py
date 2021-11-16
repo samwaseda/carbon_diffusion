@@ -46,7 +46,8 @@ class Carbon:
         diffusion_coefficient=1,
         fill_value=0.01,
         force_constant=0,
-        chemical_repulsion=0,
+        c_max=0.33,
+        c_slope=5,
     ):
         self.L = L
         self.N = N
@@ -67,7 +68,8 @@ class Carbon:
         self.fermi = False
         self._c_density = None
         self._c_partial = None
-        self.chemical_repulsion = chemical_repulsion
+        self.c_max = c_max
+        self.c_slope = c_slope
 
     def initialize(self):
         self._k_mesh = None
@@ -273,21 +275,74 @@ class Carbon:
 
     @property
     def dUdt(self):
-        dUdt = (1 - 4 * self.c) * np.sum(self.nabla_c * self._nabla_u, axis=-1)
-        dUdt += self.c * (1 - 3 * self.c) * self._laplace_u
-        if self.chemical_repulsion > 0:
-            dUdt += self.c_density * self.chemical_repulsion * (
-                (1 - 2 * self.c) * np.sum(self.nabla_c**2, axis=-1) + self.c * (1 - self.c) * self.laplace_c
-            )
+        dUdt = (1 - self.c) * np.sum(self.nabla_c * self._nabla_u, axis=-1)
+        dUdt += self.c * (1 - self.c) * self._laplace_u
         return self.D / self.kBT * dUdt
 
     @property
+    def _rho_prefactor(self):
+        return 1 / self.c_max**2 - self.c_slope / self.c_max
+
+    @property
+    def _rho(self):
+        return (self.c_slope + self._rho_prefactor * self.c) * self.c
+
+    @property
+    def _rho_1_rho(self):
+        return self._rho * (1 - self._rho)
+
+    @property
+    def _drho_dc(self):
+        return self.c_slope + 2 * self._rho_prefactor * self.c
+
+    @property
+    def _nabla_drho_dc(self):
+        return 2 * self._rho_prefactor * self.nabla_c
+
+    @property
+    def _laplace_drho_dc(self):
+        return 2 * self._rho_prefactor * self.laplace_c
+
+    @property
+    def _nabla_rho(self):
+        return (self.nabla_c.T * (
+            self.c_slope + 2 * self._rho_prefactor * self.c
+        ).T).T
+
+    @property
+    def _laplace_rho(self):
+        return self.laplace_c * (
+            self.c_slope + 2 * self._rho_prefactor * self.c
+        ) + 2 * self._rho_prefactor * np.sum(self.nabla_c**2, axis=-1)
+
+    @property
+    def _nabla_s(self):
+        return -(
+            self._nabla_drho_dc.T * np.log(self._rho / (1 - self._rho)).T
+            + self._drho_dc.T * self._nabla_rho.T / self._rho_1_rho.T
+        ).T
+
+    @property
+    def _laplace_s(self):
+        return -(
+            self._laplace_drho_dc * np.log(self._rho / (1 - self._rho))
+            + 2 * np.sum(self._nabla_drho_dc * self._nabla_rho, axis=-1) / self._rho_1_rho
+            + self._drho_dc * (
+                self._laplace_rho
+                - np.sum(self._nabla_rho**2, axis=-1) * (1 - 2 * self._rho) / self._rho_1_rho
+            ) / self._rho_1_rho
+        )
+
+    @property
     def dSdt(self):
-        return self.c_density * self.D * self.laplace_c
+        return self.D * self.c_density * (
+            (1 - 2 * self.c) * self.D * np.sum(self.nabla_c * self._nabla_s, axis=-1)
+            + self.c * (1 - self.c) * self._laplace_s
+        )
 
     @property
     def dcdt(self):
-        return self.dUdt + self.dSdt
+        return self.dUdt - self.dSdt
 
     @property
     def free_energy(self):
